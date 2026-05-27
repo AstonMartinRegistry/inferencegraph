@@ -23,6 +23,8 @@ type Props = {
   focusedId?: ProviderId | null;
 };
 
+// ── helpers ───────────────────────────────────────────────────────────────────
+
 function latestReading(points: LatencyPoint[]): LatencyPoint | null {
   const cutoff = Date.now() - 60_000;
   for (let i = points.length - 1; i >= 0; i--) {
@@ -31,10 +33,7 @@ function latestReading(points: LatencyPoint[]): LatencyPoint | null {
   return null;
 }
 
-function previousValidValue(
-  points: LatencyPoint[],
-  metric: MetricKey,
-): number | null {
+function previousValidValue(points: LatencyPoint[], metric: MetricKey): number | null {
   for (let i = points.length - 2; i >= 0; i--) {
     const v = metricValue(points[i], metric);
     if (v !== null) return v;
@@ -42,10 +41,38 @@ function previousValidValue(
   return null;
 }
 
-function countTimeoutsOverWindow(
+function isFailedReading(point: LatencyPoint | null): boolean {
+  return (
+    point?.failure === "timeout" ||
+    point?.failure === "rate_limit" ||
+    (point !== null && !point.ok)
+  );
+}
+
+function percentileOverWindow(
   points: LatencyPoint[],
+  metric: MetricKey,
   windowMs: number,
-): number {
+  p: number,
+): number | null {
+  const cutoff = Date.now() - windowMs;
+  const values: number[] = [];
+  for (const pt of points) {
+    if (pt.timestamp < cutoff) continue;
+    const v = metricValue(pt, metric);
+    if (v === null) continue;
+    values.push(v);
+  }
+  if (values.length === 0) return null;
+  values.sort((a, b) => a - b);
+  const idx = (p / 100) * (values.length - 1);
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return values[lo];
+  return values[lo] + (values[hi] - values[lo]) * (idx - lo);
+}
+
+function countTimeoutsOverWindow(points: LatencyPoint[], windowMs: number): number {
   const cutoff = Date.now() - windowMs;
   let count = 0;
   for (const p of points) {
@@ -54,6 +81,8 @@ function countTimeoutsOverWindow(
   }
   return count;
 }
+
+// ── formatting ────────────────────────────────────────────────────────────────
 
 function formatNumber(value: number, metric: MetricKey): string {
   if (metric === "tpot") {
@@ -80,51 +109,17 @@ function formatCost(value: number | null | undefined): string {
   return `$${value.toFixed(2)}`;
 }
 
-type SortColumn = "recent" | "average" | "timeouts" | "input" | "output";
+// ── sorting ───────────────────────────────────────────────────────────────────
+
+type SortColumn = "recent" | "average" | "p90" | "p95" | "timeout";
 
 const SORT_COLUMNS: { key: SortColumn; label: string }[] = [
-  { key: "recent", label: "recent" },
+  { key: "recent",  label: "recent" },
   { key: "average", label: "average" },
-  { key: "timeouts", label: "timeouts" },
-  { key: "input", label: "input" },
-  { key: "output", label: "output" },
+  { key: "p90",     label: "p90" },
+  { key: "p95",     label: "p95" },
+  { key: "timeout", label: "timeout" },
 ];
-
-function isFailedReading(point: LatencyPoint | null): boolean {
-  return (
-    point?.failure === "timeout" ||
-    point?.failure === "rate_limit" ||
-    (point !== null && !point.ok)
-  );
-}
-
-function sortValueForColumn(
-  id: ProviderId,
-  column: SortColumn,
-  series: Record<ProviderId, LatencyPoint[]>,
-  metric: MetricKey,
-  windowMs: number,
-  averages: Map<ProviderId, number | null>,
-): number | null {
-  const points = series[id] ?? [];
-  const provider = PROVIDER_MAP[id];
-
-  switch (column) {
-    case "recent": {
-      const last = latestReading(points);
-      if (!last || isFailedReading(last)) return null;
-      return metricValue(last, metric);
-    }
-    case "average":
-      return averages.get(id) ?? null;
-    case "timeouts":
-      return countTimeoutsOverWindow(points, windowMs);
-    case "input":
-      return provider.cost?.input ?? null;
-    case "output":
-      return provider.cost?.output ?? null;
-  }
-}
 
 function compareSortValues(a: number | null, b: number | null): number {
   if (a === null && b === null) return 0;
@@ -132,6 +127,8 @@ function compareSortValues(a: number | null, b: number | null): number {
   if (b === null) return -1;
   return a - b;
 }
+
+// ── component ─────────────────────────────────────────────────────────────────
 
 export function ProviderList({
   activeProviders,
@@ -146,32 +143,38 @@ export function ProviderList({
   if (activeProviders.length === 0) return null;
 
   const averages = new Map<ProviderId, number | null>();
+  const p90s     = new Map<ProviderId, number | null>();
+  const p95s     = new Map<ProviderId, number | null>();
+  const timeouts = new Map<ProviderId, number>();
+
   for (const id of activeProviders) {
-    averages.set(id, averageOverWindow(series[id] ?? [], metric, windowMs));
+    const pts = series[id] ?? [];
+    averages.set(id, averageOverWindow(pts, metric, windowMs));
+    p90s.set(id, percentileOverWindow(pts, metric, windowMs, 90));
+    p95s.set(id, percentileOverWindow(pts, metric, windowMs, 95));
+    timeouts.set(id, countTimeoutsOverWindow(pts, windowMs));
   }
+
+  const getVal = (id: ProviderId, col: SortColumn): number | null => {
+    const pts = series[id] ?? [];
+    if (col === "recent") {
+      const last = latestReading(pts);
+      if (!last || isFailedReading(last)) return null;
+      return metricValue(last, metric);
+    }
+    if (col === "average") return averages.get(id) ?? null;
+    if (col === "p90")     return p90s.get(id) ?? null;
+    if (col === "p95")     return p95s.get(id) ?? null;
+    if (col === "timeout") return timeouts.get(id) ?? null;
+    return null;
+  };
 
   const sorted = [...activeProviders].sort((a, b) => {
     if (focusedId) {
       if (a === focusedId) return -1;
       if (b === focusedId) return 1;
     }
-    const aVal = sortValueForColumn(
-      a,
-      sortColumn,
-      series,
-      metric,
-      windowMs,
-      averages,
-    );
-    const bVal = sortValueForColumn(
-      b,
-      sortColumn,
-      series,
-      metric,
-      windowMs,
-      averages,
-    );
-    return compareSortValues(aVal, bVal);
+    return compareSortValues(getVal(a, sortColumn), getVal(b, sortColumn));
   });
 
   return (
@@ -209,106 +212,108 @@ export function ProviderList({
           })}
         </div>
       </div>
+
       <ul className="provider-list">
-      {sorted.map((id) => {
-        const provider = PROVIDER_MAP[id];
-        const points = series[id] ?? [];
-        const last = latestReading(points);
-        const failed = isFailedReading(last);
+        {sorted.map((id) => {
+          const provider   = PROVIDER_MAP[id];
+          const pts        = series[id] ?? [];
+          const last       = latestReading(pts);
+          const failed     = isFailedReading(last);
+          const latestVal  = last && !failed ? metricValue(last, metric) : null;
+          const prevVal    = previousValidValue(pts, metric);
+          const delta      = latestVal !== null && prevVal !== null ? latestVal - prevVal : null;
+          const direction  = delta === null ? null : delta > 0 ? "up" : delta < 0 ? "down" : "flat";
+          const arrow      = direction === "up" ? "↑" : direction === "down" ? "↓" : "·";
+          const errorDetail = failed ? parseApiError(last?.error)?.toLowerCase() ?? null : null;
+          const isDimmed   = focusedId !== null && focusedId !== id;
 
-        const latestValue =
-          last && !failed ? metricValue(last, metric) : null;
-        const prevValue = previousValidValue(points, metric);
-        const delta =
-          latestValue !== null && prevValue !== null
-            ? latestValue - prevValue
-            : null;
-        const avg = averages.get(id) ?? null;
-        const timeouts = countTimeoutsOverWindow(points, windowMs);
-
-        const direction =
-          delta === null
-            ? null
-            : delta > 0
-              ? "up"
-              : delta < 0
-                ? "down"
-                : "flat";
-        const arrow =
-          direction === "up" ? "↑" : direction === "down" ? "↓" : "·";
-        const isDimmed = focusedId !== null && focusedId !== id;
-        const errorDetail = failed
-          ? parseApiError(last?.error)?.toLowerCase() ?? null
-          : null;
-
-        return (
-          <li
-            key={id}
-            className={`provider-grid provider-row${isDimmed ? " dimmed" : ""}`}
-          >
-            <span
-              className="provider-dot"
-              style={{
-                background: isDimmed
-                  ? "#cfcfcf"
-                  : providerColor(colors, id),
-              }}
-              aria-hidden
-            />
-            <span className="provider-name-cell">
-              <span className="provider-name">{provider.name}</span>
-              {provider.modelUrl ? (
-                <a
-                  className="provider-model provider-model-link"
-                  href={provider.modelUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {provider.modelLabel ?? provider.model}
-                </a>
-              ) : (
-                <span className="provider-model">{provider.model}</span>
-              )}
-            </span>
-            <span
-              className={`provider-stat${failed ? " err" : ""}`}
-              title={errorDetail ?? undefined}
-              style={{ paddingRight: "13px" }}
+          return (
+            <li
+              key={id}
+              className={`provider-grid provider-row${isDimmed ? " dimmed" : ""}`}
             >
-              <span className="provider-stat-value">
-                {formatMetricDisplay(last, metric)}
-              </span>
-              {delta !== null && direction !== null && (
-                <span className={`provider-delta ${direction}`}>
-                  {arrow} {formatDeltaMagnitude(delta, metric)}
-                </span>
-              )}
-            </span>
-            <span className="provider-stat">
-              <span className="provider-stat-value">
-                {avg !== null ? formatNumber(avg, metric) : "—"}
-              </span>
-            </span>
-            <span className="provider-stat">
               <span
-                className={`provider-stat-value${timeouts > 0 ? " warn" : ""}`}
+                className="provider-dot"
+                style={{ background: isDimmed ? "#cfcfcf" : providerColor(colors, id) }}
+                aria-hidden
+              />
+
+              <span className="provider-name-cell">
+                <span className="provider-name">
+                  {provider.name}
+                  {provider.modelUrl && (
+                    <a
+                      className="provider-inline-link"
+                      href={provider.modelUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      link
+                    </a>
+                  )}
+                </span>
+                {(provider.cost?.input != null || provider.cost?.output != null) && (
+                  <span className="provider-pricing">
+                    {provider.cost?.input != null && (
+                      <span className="cost-pill cost-pill-in">
+                        {formatCost(provider.cost.input)} in
+                      </span>
+                    )}
+                    {provider.cost?.output != null && (
+                      <span className="cost-pill cost-pill-out">
+                        {formatCost(provider.cost.output)} out
+                      </span>
+                    )}
+                  </span>
+                )}
+              </span>
+
+              {/* recent */}
+              <span
+                className={`provider-stat${failed ? " err" : ""}`}
+                title={errorDetail ?? undefined}
+                style={{ paddingRight: "13px" }}
               >
-                {timeouts}
+                <span className="provider-stat-value">
+                  {formatMetricDisplay(last, metric)}
+                </span>
+                {delta !== null && direction !== null && (
+                  <span className={`provider-delta ${direction}`}>
+                    {arrow} {formatDeltaMagnitude(delta, metric)}
+                  </span>
+                )}
               </span>
-            </span>
-            <span className="provider-stat">
-              <span className="provider-stat-value">
-                {formatCost(provider.cost?.input)}
+
+              {/* average */}
+              <span className="provider-stat">
+                <span className="provider-stat-value">
+                  {averages.get(id) != null ? formatNumber(averages.get(id)!, metric) : "—"}
+                </span>
               </span>
-            </span>
-            <span className="provider-stat" style={{ paddingLeft: "13px" }}>
-              <span className="provider-stat-value">
-                {formatCost(provider.cost?.output)}
+
+              {/* p90 */}
+              <span className="provider-stat">
+                <span className="provider-stat-value">
+                  {p90s.get(id) != null ? formatNumber(p90s.get(id)!, metric) : "—"}
+                </span>
               </span>
-            </span>
-          </li>
-        );
-      })}
+
+              {/* p95 */}
+              <span className="provider-stat">
+                <span className="provider-stat-value">
+                  {p95s.get(id) != null ? formatNumber(p95s.get(id)!, metric) : "—"}
+                </span>
+              </span>
+
+              {/* timeout */}
+              <span className="provider-stat" style={{ paddingLeft: "6px" }}>
+                <span className={`provider-stat-value${timeouts.get(id)! > 0 ? " warn" : ""}`}>
+                  {timeouts.get(id)}
+                </span>
+              </span>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

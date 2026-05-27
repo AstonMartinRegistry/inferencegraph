@@ -544,6 +544,54 @@ body {
   color: #2a54a0;
 }
 
+.provider-inline-link {
+  display: inline;
+  margin-left: 8px;
+  font-size: 13px;
+  letter-spacing: -0.005em;
+  color: #3b6fc7;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.provider-inline-link:hover {
+  color: #2a54a0;
+}
+
+.provider-pricing {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+  align-items: center;
+  margin-top: 5px;
+}
+
+.cost-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: var(--m3-corner-full);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.cost-pill-in {
+  background: #ffffff;
+  color: #000000;
+  border: 1px solid #000000 !important;
+}
+
+.cost-pill-out {
+  background: #000000;
+  color: #ffffff;
+}
+
+.provider-row.dimmed .provider-pricing {
+  opacity: 0.25;
+}
+
 
 .provider-stat {
   display: flex;
@@ -601,6 +649,7 @@ body {
 .provider-row.dimmed .provider-name,
 .provider-row.dimmed .provider-model,
 .provider-row.dimmed .provider-model-link,
+.provider-row.dimmed .provider-inline-link,
 .provider-row.dimmed .provider-stat-value,
 .provider-row.dimmed .provider-stat-label,
 .provider-row.dimmed .provider-delta,
@@ -612,7 +661,8 @@ body {
   color: #b8b8b8;
 }
 
-.provider-row.dimmed .provider-model-link:hover {
+.provider-row.dimmed .provider-model-link:hover,
+.provider-row.dimmed .provider-inline-link:hover {
   color: #b8b8b8;
 }
 
